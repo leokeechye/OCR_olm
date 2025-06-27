@@ -36,17 +36,36 @@ def test_mathpix_api(app_id, app_key):
     
     headers = {
         "app_id": app_id,
-        "app_key": app_key
+        "app_key": app_key,
+        "Content-type": "application/json"
     }
     
     try:
-        # Test with a simple request to check credentials
-        response = requests.get(
-            "https://api.mathpix.com/v3/pdf-types",
+        # Test with a simple OCR request using a tiny test image
+        # Create a small 1x1 white pixel image for testing
+        test_image = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+        
+        data = {
+            "src": f"data:image/png;base64,{test_image}",
+            "formats": ["text"],
+            "data_options": {
+                "include_asciimath": False,
+                "include_latex": False
+            }
+        }
+        
+        response = requests.post(
+            "https://api.mathpix.com/v3/text",
+            json=data,
             headers=headers
         )
+        
         if response.status_code == 200:
             return True, "Connected successfully"
+        elif response.status_code == 401:
+            return False, "Invalid credentials"
+        elif response.status_code == 403:
+            return False, "Forbidden - check your API limits"
         else:
             return False, f"Authentication failed: {response.status_code}"
     except Exception as e:
