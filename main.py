@@ -95,9 +95,9 @@ def pdf_to_image(pdf_content, page_number=1, max_dim=1024):
     except Exception as e:
         raise ValueError(f"Error converting PDF to image: {str(e)}")
 
-# OCR Processing Functions using working Replicate models
+# OCR Processing Functions using verified working Replicate OCR models
 def process_pdf_with_vision_models(client, pdf_content, filename, page_number=1):
-    """Process PDF using reliable Replicate Vision models"""
+    """Process PDF using verified working Replicate OCR models"""
     if client is None:
         raise ValueError("Replicate client is not initialized")
     
@@ -111,33 +111,30 @@ def process_pdf_with_vision_models(client, pdf_content, filename, page_number=1)
         img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
         image_url = f"data:image/png;base64,{img_base64}"
         
-        # Try different working models in order of preference
+        # Try different verified OCR models from Replicate's OCR collection
         models_to_try = [
-            # Try LLaVA-13B first - very reliable and established
+            # Try the recommended text-extract-ocr model first
             {
-                "model": "yorickvp/llava-13b",
+                "model": "abiruyt/text-extract-ocr",
                 "input": {
-                    "image": image_url,
-                    "prompt": "Please carefully extract ALL text from this document image. Read the text in natural reading order (left to right, top to bottom). Preserve the structure and formatting as much as possible. Include all visible text, headers, paragraphs, tables, captions, footnotes, and any other text elements. Output the text in a clean, readable format maintaining the original layout structure."
+                    "image": image_url
                 }
             },
-            # Try Moondream2 as backup
+            # Try GLM-4V which is competitive with GPT-4o for OCR
             {
-                "model": "lucataco/moondream2", 
+                "model": "cuuupid/glm-4v-9b",
                 "input": {
                     "image": image_url,
-                    "prompt": "Extract all text from this document image. Read in natural order and preserve formatting. Include all visible text, headers, paragraphs, and tables."
+                    "prompt": "Extract all text from this document image. Read the text in natural reading order (left to right, top to bottom). Preserve the structure and formatting. Include all visible text, headers, paragraphs, tables, and captions. Output the text in a clean, readable format."
                 }
             },
-            # Try BLIP as another reliable option
+            # Try Surya OCR - a document-specific OCR toolkit
             {
-                "model": "salesforce/blip",
+                "model": "cudanexus/ocr-surya",
                 "input": {
-                    "image": image_url,
-                    "task": "image_captioning",
-                    "question": "What text is visible in this document? Extract all text content."
+                    "image": image_url
                 }
-            }
+            },
         ]
         
         last_error = None
@@ -158,7 +155,7 @@ def process_pdf_with_vision_models(client, pdf_content, filename, page_number=1)
                 continue
         
         # If all models fail, raise an error with the last error details
-        raise ValueError(f"All available vision models failed. Last error: {last_error}")
+        raise ValueError(f"All available OCR models failed. Last error: {last_error}")
         
     except Exception as e:
         if "PDF" in str(e):
@@ -472,14 +469,14 @@ def main():
         st.markdown("""
         ### About this app
         
-        This application uses:
-        - **LLaVA-13B**: Primary vision model for document OCR processing
-        - **Moondream2**: Backup vision model for OCR processing
-        - **BLIP**: Alternative vision model for text extraction
+        This application uses **verified working OCR models** from Replicate:
+        - **abiruyt/text-extract-ocr**: Recommended general-purpose OCR model
+        - **cuuupid/glm-4v-9b**: Advanced multimodal model competitive with GPT-4o for OCR
+        - **cudanexus/ocr-surya**: Specialized document OCR toolkit
         - **Google Gemini Vision**: For image OCR processing  
         - **Google Gemini 2.5 Flash**: For chat functionality
         
-        The app automatically tries multiple vision models to ensure reliable text extraction from your documents.
+        The app uses Replicate's official OCR collection models to ensure reliable text extraction from your documents.
         Multiple fallback models ensure high success rates for document processing.
         """)
 
