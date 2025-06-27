@@ -1,6 +1,7 @@
+mistralai
 streamlit
-replicate
-google-generativeai
+dotenv
 Pillow
-requests
+langgraph
+google-generativeai
 PyMuPDF
