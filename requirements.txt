@@ -3,3 +3,4 @@ replicate
 google-generativeai
 Pillow
 requests
+PyMuPDF

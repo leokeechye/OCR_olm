@@ -9,6 +9,7 @@ import google.generativeai as genai
 import replicate
 import requests
 from io import BytesIO
+import fitz  # PyMuPDF for PDF processing
 
 # Load environment variables for deployment
 def load_config():
@@ -86,44 +87,94 @@ def cleanup_temp_file(file_path):
     except:
         pass
 
-# OCR Processing Functions using Replicate OlmoCR-7B
+# PDF to Image conversion
+def pdf_to_image(pdf_content, page_number=1, max_dim=1024):
+    """Convert PDF page to image with specified max dimension"""
+    try:
+        # Open PDF from bytes
+        pdf_document = fitz.open(stream=pdf_content, filetype="pdf")
+        
+        # Check if page exists
+        if page_number > len(pdf_document):
+            raise ValueError(f"Page {page_number} does not exist. PDF has {len(pdf_document)} pages.")
+        
+        # Get the page (0-indexed)
+        page = pdf_document.load_page(page_number - 1)
+        
+        # Calculate zoom factor to make longest dimension = max_dim
+        rect = page.rect
+        zoom_x = max_dim / max(rect.width, rect.height)
+        zoom_y = zoom_x
+        
+        # Create transformation matrix
+        mat = fitz.Matrix(zoom_x, zoom_y)
+        
+        # Render page to image
+        pix = page.get_pixmap(matrix=mat)
+        
+        # Convert to PIL Image
+        img_data = pix.tobytes("png")
+        image = Image.open(io.BytesIO(img_data))
+        
+        pdf_document.close()
+        
+        return image
+        
+    except Exception as e:
+        raise ValueError(f"Error converting PDF to image: {str(e)}")
+
+# OCR Processing Functions using Qwen2-VL (base model for OlmoCR)
 def process_pdf_with_olmocr(client, pdf_content, filename, page_number=1):
-    """Process PDF using Replicate OlmoCR-7B"""
+    """Process PDF using Qwen2-VL (base model of OlmoCR)"""
     if client is None:
         raise ValueError("Replicate client is not initialized")
     
-    temp_path = None
     try:
-        # Save PDF to temporary file
-        temp_path, _ = upload_file_to_temporary_url(pdf_content, filename)
+        # Convert PDF page to image
+        image = pdf_to_image(pdf_content, page_number, max_dim=1024)
         
-        # For Replicate, we need to upload the file to a publicly accessible URL
-        # In this example, we'll read the file and encode it as base64 for the API
-        with open(temp_path, "rb") as f:
-            pdf_data = f.read()
+        # Convert image to base64
+        buffered = io.BytesIO()
+        image.save(buffered, format="PNG")
+        img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        image_url = f"data:image/png;base64,{img_base64}"
         
-        # Convert PDF to base64 data URL
-        pdf_base64 = base64.b64encode(pdf_data).decode('utf-8')
-        pdf_url = f"data:application/pdf;base64,{pdf_base64}"
-        
-        # Run the OlmoCR model
+        # Use Qwen2-VL model with OCR-focused prompt
+        # This is the base model that OlmoCR is fine-tuned from
         output = client.run(
-            "lucataco/olmocr-7b",
+            "lucataco/qwen2-vl-7b-instruct",
             input={
-                "pdf": pdf_url,
-                "page_number": page_number,
-                "temperature": 0.1,  # Low temperature for consistent OCR
-                "max_new_tokens": 4096
+                "image": image_url,
+                "prompt": """Please extract all text from this document image. 
+                
+Follow these instructions:
+1. Read the text in natural reading order (left to right, top to bottom)
+2. Preserve the structure and formatting as much as possible
+3. Include all visible text, headers, paragraphs, tables, captions, etc.
+4. If there are multiple columns, read them in the correct order
+5. Maintain line breaks and spacing where appropriate
+6. Output the text in a clean, readable format
+
+Extract all text:""",
+                "max_tokens": 4096
             }
         )
         
         return output
         
     except Exception as e:
-        raise ValueError(f"Error processing PDF with OlmoCR: {str(e)}")
-    finally:
-        if temp_path:
-            cleanup_temp_file(temp_path)
+        # Fallback: try the original olmocr model with simpler parameters
+        try:
+            output = client.run(
+                "lucataco/olmocr-7b",
+                input={
+                    "image": image_url,
+                    "prompt": "Extract all text from this document in natural reading order."
+                }
+            )
+            return output
+        except Exception as e2:
+            raise ValueError(f"Error processing PDF. Qwen2-VL attempt: {str(e)}. OlmoCR attempt: {str(e2)}")
 
 def process_image_with_olmocr(image_data):
     """Process image using Google Gemini Vision (since OlmoCR is primarily for PDFs)"""
@@ -150,22 +201,11 @@ def process_image_with_olmocr(image_data):
 def parse_olmocr_output(output):
     """Parse the output from OlmoCR model"""
     try:
-        # The output is typically a JSON string containing the extracted text
+        # The output should be a string containing the extracted text
         if isinstance(output, str):
-            # Try to parse as JSON
-            try:
-                parsed_output = json.loads(output)
-                if isinstance(parsed_output, list) and len(parsed_output) > 0:
-                    # Extract the natural_text from the first result
-                    first_result = json.loads(parsed_output[0]) if isinstance(parsed_output[0], str) else parsed_output[0]
-                    return first_result.get('natural_text', str(output))
-                else:
-                    return str(output)
-            except json.JSONDecodeError:
-                # If not JSON, return as is
-                return str(output)
+            return output.strip()
         else:
-            return str(output)
+            return str(output).strip()
     except Exception as e:
         return f"Error parsing output: {str(e)}"
 
@@ -313,8 +353,30 @@ def main():
                     content = uploaded_file.read()
                     
                     try:
-                        with st.spinner(f"Processing page {page_number} of PDF with OlmoCR..."):
-                            # Process with OlmoCR
+                        # First, check how many pages the PDF has
+                        try:
+                            pdf_doc = fitz.open(stream=content, filetype="pdf")
+                            total_pages = len(pdf_doc)
+                            pdf_doc.close()
+                            
+                            if page_number > total_pages:
+                                st.error(f"Page {page_number} does not exist. This PDF has {total_pages} pages.")
+                                return
+                                
+                            st.info(f"PDF has {total_pages} pages. Processing page {page_number}...")
+                        except Exception as e:
+                            st.error(f"Error reading PDF: {str(e)}")
+                            return
+                        
+                        with st.spinner(f"Converting page {page_number} to image and processing with Qwen2-VL/OlmoCR..."):
+                            # Show the converted image for reference
+                            try:
+                                preview_image = pdf_to_image(content, page_number, max_dim=1024)
+                                st.image(preview_image, caption=f"Page {page_number} (processed image)", width=400)
+                            except Exception as e:
+                                st.warning(f"Could not display preview: {str(e)}")
+                            
+                            # Process with Qwen2-VL/OlmoCR
                             ocr_output = process_pdf_with_olmocr(
                                 replicate_client, 
                                 content, 
@@ -369,7 +431,7 @@ def main():
             st.info("Please configure your Replicate API token to upload documents.")
     
     # Main area: Display chat interface
-    st.title("Document OCR & Chat with OlmoCR-7B")
+    st.title("Document OCR & Chat with Qwen2-VL / OlmoCR")
     
     # Document preview area
     if "document_loaded" in st.session_state and st.session_state.document_loaded:
@@ -420,11 +482,13 @@ def main():
         ### About this app
         
         This application uses:
-        - **Replicate OlmoCR-7B**: For PDF OCR processing
-        - **Google Gemini Vision**: For image OCR processing  
+        - **Qwen2-VL-7B**: Primary OCR model (base model for OlmoCR) for PDF processing
+        - **OlmoCR-7B**: Fallback OCR model (if available) for PDF processing
+        - **Google Gemini Vision**: Alternative for image OCR processing  
         - **Google Gemini 2.5 Flash**: For chat functionality
         
-        OlmoCR-7B is a specialized OCR model fine-tuned from Qwen2-VL-7B-Instruct that excels at extracting text from PDF documents.
+        Qwen2-VL-7B is a powerful vision-language model that excels at extracting text from document images.
+        OlmoCR-7B is a specialized fine-tuned version of Qwen2-VL specifically optimized for OCR tasks.
         """)
 
 if __name__ == "__main__":
