@@ -59,34 +59,6 @@ def test_google_api(api_key):
     except Exception as e:
         return False, f"Failed to connect: {str(e)}"
 
-# File upload helper functions
-def upload_file_to_temporary_url(file_content, filename):
-    """Upload file to a temporary hosting service and return URL"""
-    # For this example, we'll save to temp file and use a file upload service
-    # In production, you might want to use a proper file hosting service
-    
-    # Save to temporary file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{filename}") as tmp_file:
-        tmp_file.write(file_content)
-        temp_path = tmp_file.name
-    
-    try:
-        # For demo purposes, we'll use the file directly
-        # In production, upload to a service like AWS S3, Google Cloud Storage, etc.
-        return temp_path, temp_path
-    except Exception as e:
-        if os.path.exists(temp_path):
-            os.unlink(temp_path)
-        raise e
-
-def cleanup_temp_file(file_path):
-    """Clean up temporary file"""
-    try:
-        if os.path.exists(file_path):
-            os.unlink(file_path)
-    except:
-        pass
-
 # PDF to Image conversion
 def pdf_to_image(pdf_content, page_number=1, max_dim=1024):
     """Convert PDF page to image with specified max dimension"""
@@ -123,9 +95,9 @@ def pdf_to_image(pdf_content, page_number=1, max_dim=1024):
     except Exception as e:
         raise ValueError(f"Error converting PDF to image: {str(e)}")
 
-# OCR Processing Functions using available Vision models
-def process_pdf_with_olmocr(client, pdf_content, filename, page_number=1):
-    """Process PDF using available Replicate Vision models"""
+# OCR Processing Functions using working Replicate models
+def process_pdf_with_vision_models(client, pdf_content, filename, page_number=1):
+    """Process PDF using reliable Replicate Vision models"""
     if client is None:
         raise ValueError("Replicate client is not initialized")
     
@@ -141,49 +113,61 @@ def process_pdf_with_olmocr(client, pdf_content, filename, page_number=1):
         
         # Try different working models in order of preference
         models_to_try = [
-            # Try Moondream2 - a reliable vision model for OCR
-            {
-                "model": "lucataco/moondream2",
-                "input": {
-                    "image": image_url,
-                    "prompt": "Extract all text from this document image. Read the text in natural reading order (left to right, top to bottom). Preserve the structure and formatting. Include all visible text, headers, paragraphs, tables, and captions. Output the text in a clean, readable format."
-                }
-            },
-            # Try LLaVA as backup
+            # Try LLaVA-13B first - very reliable and established
             {
                 "model": "yorickvp/llava-13b",
                 "input": {
                     "image": image_url,
-                    "prompt": "Please extract all text from this document image. Read in natural order and preserve formatting. Include all visible text."
+                    "prompt": "Please carefully extract ALL text from this document image. Read the text in natural reading order (left to right, top to bottom). Preserve the structure and formatting as much as possible. Include all visible text, headers, paragraphs, tables, captions, footnotes, and any other text elements. Output the text in a clean, readable format maintaining the original layout structure."
                 }
             },
-            # Try SmolVLM as another backup
+            # Try Moondream2 as backup
             {
-                "model": "lucataco/smolvlm-instruct",
+                "model": "lucataco/moondream2", 
                 "input": {
                     "image": image_url,
-                    "prompt": "Extract all text from this document image in natural reading order. Preserve structure and formatting.",
-                    "max_new_tokens": 2000
+                    "prompt": "Extract all text from this document image. Read in natural order and preserve formatting. Include all visible text, headers, paragraphs, and tables."
+                }
+            },
+            # Try BLIP as another reliable option
+            {
+                "model": "salesforce/blip",
+                "input": {
+                    "image": image_url,
+                    "task": "image_captioning",
+                    "question": "What text is visible in this document? Extract all text content."
                 }
             }
         ]
         
-        for model_config in models_to_try:
+        last_error = None
+        for i, model_config in enumerate(models_to_try):
             try:
+                st.info(f"Trying model {i+1}/{len(models_to_try)}: {model_config['model']}")
                 output = client.run(model_config["model"], input=model_config["input"])
-                if output and len(str(output).strip()) > 10:  # Basic validation
+                
+                if output and len(str(output).strip()) > 20:  # Basic validation for meaningful content
+                    st.success(f"✅ Successfully processed with {model_config['model']}")
                     return output
+                else:
+                    st.warning(f"Model {model_config['model']} returned minimal content, trying next...")
+                    
             except Exception as e:
-                continue  # Try next model
+                last_error = str(e)
+                st.warning(f"Model {model_config['model']} failed: {str(e)[:100]}... Trying next model.")
+                continue
         
-        # If all models fail, raise an error
-        raise ValueError("All available vision models failed to process the image")
+        # If all models fail, raise an error with the last error details
+        raise ValueError(f"All available vision models failed. Last error: {last_error}")
         
     except Exception as e:
-        raise ValueError(f"Error processing PDF: {str(e)}")
+        if "PDF" in str(e):
+            raise e
+        else:
+            raise ValueError(f"Error processing document: {str(e)}")
 
-def process_image_with_olmocr(image_data):
-    """Process image using Google Gemini Vision (since OlmoCR is primarily for PDFs)"""
+def process_image_with_vision(image_data):
+    """Process image using Google Gemini Vision"""
     try:
         genai.configure(api_key=google_api_key)
         
@@ -204,12 +188,13 @@ def process_image_with_olmocr(image_data):
     except Exception as e:
         raise ValueError(f"Error processing image: {str(e)}")
 
-def parse_olmocr_output(output):
-    """Parse the output from OlmoCR model"""
+def parse_vision_output(output):
+    """Parse the output from Vision models"""
     try:
-        # The output should be a string containing the extracted text
         if isinstance(output, str):
             return output.strip()
+        elif isinstance(output, list):
+            return " ".join([str(item) for item in output]).strip()
         else:
             return str(output).strip()
     except Exception as e:
@@ -281,7 +266,7 @@ If the document doesn't specifically mention the exact information asked, please
 def main():
     global replicate_api_key, google_api_key
     
-    st.set_page_config(page_title="Document OCR & Chat with OlmoCR", layout="wide")
+    st.set_page_config(page_title="Document OCR & Chat with Vision Models", layout="wide")
     
     # Sidebar: Authentication for API keys
     with st.sidebar:
@@ -383,7 +368,7 @@ def main():
                                 st.warning(f"Could not display preview: {str(e)}")
                             
                             # Process with available Vision models
-                            ocr_output = process_pdf_with_olmocr(
+                            ocr_output = process_pdf_with_vision_models(
                                 replicate_client, 
                                 content, 
                                 uploaded_file.name, 
@@ -391,7 +376,7 @@ def main():
                             )
                             
                             # Parse the output
-                            extracted_text = parse_olmocr_output(ocr_output)
+                            extracted_text = parse_vision_output(ocr_output)
                             
                             if extracted_text and len(extracted_text.strip()) > 0:
                                 st.session_state.document_content = extracted_text
@@ -423,7 +408,7 @@ def main():
                         
                         with st.spinner("Processing image with Gemini Vision..."):
                             # Process image with Gemini Vision
-                            extracted_text = process_image_with_olmocr(uploaded_image.getvalue())
+                            extracted_text = process_image_with_vision(uploaded_image.getvalue())
                             
                             if extracted_text and len(extracted_text.strip()) > 0:
                                 st.session_state.document_content = extracted_text
@@ -488,13 +473,14 @@ def main():
         ### About this app
         
         This application uses:
-        - **Moondream2**: Primary vision model for document OCR processing
-        - **LLaVA-13B**: Backup vision model for OCR processing
-        - **SmolVLM-Instruct**: Alternative compact vision model
+        - **LLaVA-13B**: Primary vision model for document OCR processing
+        - **Moondream2**: Backup vision model for OCR processing
+        - **BLIP**: Alternative vision model for text extraction
         - **Google Gemini Vision**: For image OCR processing  
         - **Google Gemini 2.5 Flash**: For chat functionality
         
         The app automatically tries multiple vision models to ensure reliable text extraction from your documents.
+        Multiple fallback models ensure high success rates for document processing.
         """)
 
 if __name__ == "__main__":
