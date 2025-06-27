@@ -1,7 +1,5 @@
-mistralai
 streamlit
-dotenv
 Pillow
-langgraph
+requests
 google-generativeai
-PyMuPDF
+python-dotenv

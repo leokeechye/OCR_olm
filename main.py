@@ -2,44 +2,55 @@ import streamlit as st
 import base64
 import tempfile
 import os
-from mistralai import Mistral
+import requests
+import json
 from PIL import Image
 import io
-from mistralai import DocumentURLChunk, ImageURLChunk
-from mistralai.models import OCRResponse
 import google.generativeai as genai
+import time
 
 # Load environment variables for deployment
 def load_config():
     """Load configuration from Streamlit secrets or environment variables"""
     try:
         # Try Streamlit secrets first (for Streamlit Cloud)
-        api_key = st.secrets.get('MISTRAL_API_KEY', '')
+        app_id = st.secrets.get('MATHPIX_APP_ID', '')
+        app_key = st.secrets.get('MATHPIX_APP_KEY', '')
         google_api_key = st.secrets.get('GOOGLE_API_KEY', '')
     except:
         # Fallback to environment variables (for other platforms)
-        api_key = os.getenv('MISTRAL_API_KEY', '')
+        app_id = os.getenv('MATHPIX_APP_ID', '')
+        app_key = os.getenv('MATHPIX_APP_KEY', '')
         google_api_key = os.getenv('GOOGLE_API_KEY', '')
     
-    return api_key, google_api_key
+    return app_id, app_key, google_api_key
 
 # Global API keys
-api_key, google_api_key = load_config()
+app_id, app_key, google_api_key = load_config()
 
-# Initialize client function with proper error handling
-def initialize_mistral_client(api_key):
-    """Initialize Mistral client with error handling"""
-    if not api_key:
-        return None
+# Test Mathpix API
+def test_mathpix_api(app_id, app_key):
+    """Test Mathpix API credentials"""
+    if not app_id or not app_key:
+        return False, "Missing credentials"
+    
+    headers = {
+        "app_id": app_id,
+        "app_key": app_key
+    }
     
     try:
-        client = Mistral(api_key=api_key)
-        # Test the client with a simple API call
-        client.models.list()
-        return client
+        # Test with a simple request to check credentials
+        response = requests.get(
+            "https://api.mathpix.com/v3/pdf-types",
+            headers=headers
+        )
+        if response.status_code == 200:
+            return True, "Connected successfully"
+        else:
+            return False, f"Authentication failed: {response.status_code}"
     except Exception as e:
-        st.sidebar.error(f"Failed to initialize Mistral client: {str(e)}")
-        return None
+        return False, f"Connection error: {str(e)}"
 
 # Test Google API key
 def test_google_api(api_key):
@@ -54,66 +65,151 @@ def test_google_api(api_key):
     except Exception as e:
         return False, f"Failed to connect: {str(e)}"
 
-# OCR Processing Functions
-def upload_pdf(client, content, filename):
-    """Uploads a PDF to Mistral's API and retrieves a signed URL for processing."""
-    if client is None:
-        raise ValueError("Mistral client is not initialized")
+# OCR Processing Functions with Mathpix
+def process_image_with_mathpix(image_data, app_id, app_key):
+    """Process image with Mathpix API"""
+    headers = {
+        "app_id": app_id,
+        "app_key": app_key,
+        "Content-type": "application/json"
+    }
+    
+    # Prepare the request data
+    data = {
+        "src": f"data:image/png;base64,{image_data}",
+        "formats": ["text", "md"],
+        "data_options": {
+            "include_asciimath": True,
+            "include_latex": True
+        }
+    }
+    
+    try:
+        response = requests.post(
+            "https://api.mathpix.com/v3/text",
+            json=data,
+            headers=headers
+        )
         
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = os.path.join(temp_dir, filename)
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("md", result.get("text", ""))
+        else:
+            raise Exception(f"Mathpix API error: {response.status_code} - {response.text}")
+    
+    except Exception as e:
+        raise Exception(f"Error processing image with Mathpix: {str(e)}")
+
+def process_pdf_with_mathpix(pdf_content, filename, app_id, app_key):
+    """Process PDF with Mathpix API"""
+    headers = {
+        "app_id": app_id,
+        "app_key": app_key
+    }
+    
+    # Step 1: Upload PDF
+    files = {
+        'file': (filename, pdf_content, 'application/pdf')
+    }
+    
+    options = {
+        'options_json': json.dumps({
+            'conversion_formats': {
+                'md': True,
+                'docx': False
+            },
+            'math_inline_delimiters': ['$', '$'],
+            'math_display_delimiters': ['$$', '$$']
+        })
+    }
+    
+    try:
+        # Upload the PDF
+        upload_response = requests.post(
+            "https://api.mathpix.com/v3/pdf",
+            headers=headers,
+            files=files,
+            data=options
+        )
         
-        with open(temp_path, "wb") as tmp:
-            tmp.write(content)
+        if upload_response.status_code != 200:
+            raise Exception(f"PDF upload failed: {upload_response.status_code} - {upload_response.text}")
         
-        try:
-            with open(temp_path, "rb") as file_obj:
-                file_upload = client.files.upload(
-                    file={"file_name": filename, "content": file_obj},
-                    purpose="ocr"
-                )
+        pdf_id = upload_response.json().get("pdf_id")
+        
+        # Step 2: Poll for completion
+        max_attempts = 60  # Maximum 5 minutes
+        attempt = 0
+        
+        while attempt < max_attempts:
+            status_response = requests.get(
+                f"https://api.mathpix.com/v3/pdf/{pdf_id}",
+                headers=headers
+            )
             
-            signed_url = client.files.get_signed_url(file_id=file_upload.id)
-            return signed_url.url
-        except Exception as e:
-            raise ValueError(f"Error uploading PDF: {str(e)}")
-
-def replace_images_in_markdown(markdown_str: str, images_dict: dict) -> str:
-    """Replace image placeholders with base64 encoded images in markdown."""
-    for img_name, base64_str in images_dict.items():
-        markdown_str = markdown_str.replace(f"![{img_name}]({img_name})", f"![{img_name}]({base64_str})")
-    return markdown_str
-
-def get_combined_markdown(ocr_response: OCRResponse) -> str:
-    """Combine markdown from all pages with their respective images."""
-    markdowns: list[str] = []
-    for page in ocr_response.pages:
-        image_data = {}
-        for img in page.images:
-            image_data[img.id] = img.image_base64
-        markdowns.append(replace_images_in_markdown(page.markdown, image_data))
-
-    return "\n\n".join(markdowns)
-
-def process_ocr(client, document_source):
-    """Process document with OCR API based on source type"""
-    if client is None:
-        raise ValueError("Mistral client is not initialized")
+            if status_response.status_code == 200:
+                status_data = status_response.json()
+                status = status_data.get("status")
+                
+                if status == "completed":
+                    # Get the markdown content
+                    md_response = requests.get(
+                        f"https://api.mathpix.com/v3/pdf/{pdf_id}.md",
+                        headers=headers
+                    )
+                    
+                    if md_response.status_code == 200:
+                        return md_response.text
+                    else:
+                        raise Exception(f"Failed to get markdown: {md_response.status_code}")
+                
+                elif status == "error":
+                    error_info = status_data.get("error", "Unknown error")
+                    raise Exception(f"PDF processing error: {error_info}")
+                
+                # Still processing, wait and retry
+                time.sleep(5)
+                attempt += 1
+            else:
+                raise Exception(f"Status check failed: {status_response.status_code}")
         
-    if document_source["type"] == "document_url":
-        return client.ocr.process(
-            document=DocumentURLChunk(document_url=document_source["document_url"]),
-            model="mistral-ocr-latest",
-            include_image_base64=True
+        raise Exception("PDF processing timeout - took too long")
+    
+    except Exception as e:
+        raise Exception(f"Error processing PDF with Mathpix: {str(e)}")
+
+def process_url_with_mathpix(url, app_id, app_key):
+    """Process document from URL with Mathpix API"""
+    headers = {
+        "app_id": app_id,
+        "app_key": app_key,
+        "Content-type": "application/json"
+    }
+    
+    data = {
+        "url": url,
+        "formats": ["text", "md"],
+        "data_options": {
+            "include_asciimath": True,
+            "include_latex": True
+        }
+    }
+    
+    try:
+        response = requests.post(
+            "https://api.mathpix.com/v3/text",
+            json=data,
+            headers=headers
         )
-    elif document_source["type"] == "image_url":
-        return client.ocr.process(
-            document=ImageURLChunk(image_url=document_source["image_url"]),
-            model="mistral-ocr-latest",
-            include_image_base64=True
-        )
-    else:
-        raise ValueError(f"Unsupported document source type: {document_source['type']}")
+        
+        if response.status_code == 200:
+            result = response.json()
+            return result.get("md", result.get("text", ""))
+        else:
+            raise Exception(f"Mathpix API error: {response.status_code} - {response.text}")
+    
+    except Exception as e:
+        raise Exception(f"Error processing URL with Mathpix: {str(e)}")
 
 def generate_response(context, query):
     """Generate a response using Google Gemini API"""
@@ -144,7 +240,7 @@ If the document doesn't specifically mention the exact information asked, please
             "temperature": 0.4,
             "top_p": 0.8,
             "top_k": 40,
-            "max_output_tokens": 8192,  # Increased for Gemini 2.5 Flash
+            "max_output_tokens": 8192,
         }
         
         safety_settings = [
@@ -179,7 +275,7 @@ If the document doesn't specifically mention the exact information asked, please
 
 # Streamlit UI
 def main():
-    global api_key, google_api_key
+    global app_id, app_key, google_api_key
     
     st.set_page_config(page_title="Document OCR & Chat", layout="wide")
     
@@ -188,16 +284,20 @@ def main():
         st.header("Settings")
         
         # API key inputs - only show if not already configured
-        if not api_key or not google_api_key:
+        if not app_id or not app_key or not google_api_key:
             st.warning("⚠️ API keys need to be configured for the app to work properly.")
             
             # API key inputs
-            api_key_tab1, api_key_tab2 = st.tabs(["Mistral API", "Google API"])
+            api_key_tab1, api_key_tab2 = st.tabs(["Mathpix API", "Google API"])
             
             with api_key_tab1:
-                user_api_key = st.text_input("Mistral API Key", value=api_key if api_key else "", type="password")
-                if user_api_key and user_api_key != api_key:
-                    api_key = user_api_key
+                user_app_id = st.text_input("Mathpix App ID", value=app_id if app_id else "", type="password")
+                if user_app_id and user_app_id != app_id:
+                    app_id = user_app_id
+                
+                user_app_key = st.text_input("Mathpix App Key", value=app_key if app_key else "", type="password")
+                if user_app_key and user_app_key != app_key:
+                    app_key = user_app_key
             
             with api_key_tab2:
                 user_google_api_key = st.text_input(
@@ -209,12 +309,15 @@ def main():
                 if user_google_api_key and user_google_api_key != google_api_key:
                     google_api_key = user_google_api_key
         
-        # Initialize Mistral client with the API key
-        mistral_client = None
-        if api_key:
-            mistral_client = initialize_mistral_client(api_key)
-            if mistral_client:
-                st.sidebar.success("✅ Mistral API connected successfully")
+        # Mathpix API validation
+        mathpix_connected = False
+        if app_id and app_key:
+            is_valid, message = test_mathpix_api(app_id, app_key)
+            if is_valid:
+                st.sidebar.success(f"✅ Mathpix API {message}")
+                mathpix_connected = True
+            else:
+                st.sidebar.error(f"❌ Mathpix API: {message}")
         
         # Google API key validation
         if google_api_key:
@@ -226,8 +329,8 @@ def main():
                 google_api_key = None
         
         # Display warnings for missing API keys
-        if not api_key or mistral_client is None:
-            st.sidebar.warning("⚠️ Valid Mistral API key required for document processing")
+        if not app_id or not app_key or not mathpix_connected:
+            st.sidebar.warning("⚠️ Valid Mathpix API credentials required for document processing")
         
         if not google_api_key:
             st.sidebar.warning("⚠️ Google API key required for chat functionality")
@@ -245,49 +348,59 @@ def main():
         # Document upload section
         st.subheader("Document Upload")
         
-        # Only show document upload if Mistral client is initialized
-        if mistral_client:
+        # Only show document upload if Mathpix is connected
+        if mathpix_connected:
             input_method = st.radio("Select Input Type:", ["PDF Upload", "Image Upload", "URL"])
-            
-            document_source = None
             
             if input_method == "URL":
                 url = st.text_input("Document URL:")
                 if url and st.button("Load Document from URL"):
-                    document_source = {
-                        "type": "document_url",
-                        "document_url": url
-                    }
+                    with st.spinner("Processing document from URL..."):
+                        try:
+                            content = process_url_with_mathpix(url, app_id, app_key)
+                            
+                            st.session_state.document_content = content
+                            st.session_state.display_content = content
+                            st.session_state.document_loaded = True
+                            
+                            st.success(f"Document processed successfully! Extracted {len(content)} characters.")
+                        
+                        except Exception as e:
+                            st.error(f"Error processing URL: {str(e)}")
             
             elif input_method == "PDF Upload":
                 uploaded_file = st.file_uploader("Choose PDF file", type=["pdf"])
                 if uploaded_file and st.button("Process PDF"):
                     content = uploaded_file.read()
                     
-                    try:
-                        # Prepare document source for OCR processing
-                        document_source = {
-                            "type": "document_url",
-                            "document_url": upload_pdf(mistral_client, content, uploaded_file.name)
-                        }
-                        
-                        # Show success message and download option
-                        st.success("✅ PDF uploaded and processed successfully!")
-                        
-                        # Provide download button for user to view the original
-                        st.download_button(
-                            label="📥 Download Original PDF",
-                            data=content,
-                            file_name=uploaded_file.name,
-                            mime="application/pdf",
-                            help="Download to view the original PDF file"
-                        )
-                        
-                        st.info("💡 The document content will be extracted and available for chat once processing completes.")
-                        
-                    except Exception as e:
-                        st.error(f"Error processing PDF: {str(e)}")
-                        document_source = None
+                    with st.spinner("Processing PDF... This may take a few moments."):
+                        try:
+                            # Process with Mathpix
+                            extracted_content = process_pdf_with_mathpix(
+                                content, 
+                                uploaded_file.name,
+                                app_id,
+                                app_key
+                            )
+                            
+                            st.session_state.document_content = extracted_content
+                            st.session_state.display_content = extracted_content
+                            st.session_state.document_loaded = True
+                            
+                            # Show success message and download option
+                            st.success(f"✅ PDF processed successfully! Extracted {len(extracted_content)} characters.")
+                            
+                            # Provide download button for user to view the original
+                            st.download_button(
+                                label="📥 Download Original PDF",
+                                data=content,
+                                file_name=uploaded_file.name,
+                                mime="application/pdf",
+                                help="Download to view the original PDF file"
+                            )
+                            
+                        except Exception as e:
+                            st.error(f"Error processing PDF: {str(e)}")
             
             elif input_method == "Image Upload":
                 uploaded_image = st.file_uploader("Choose Image file", type=["png", "jpg", "jpeg"])
@@ -302,53 +415,22 @@ def main():
                         image.save(buffered, format="PNG")
                         img_str = base64.b64encode(buffered.getvalue()).decode()
                         
-                        # Prepare document source for OCR processing
-                        document_source = {
-                            "type": "image_url",
-                            "image_url": f"data:image/png;base64,{img_str}"
-                        }
-                    except Exception as e:
-                        st.error(f"Error processing image: {str(e)}")
-            
-            # Process document if source is provided
-            if document_source:
-                with st.spinner("Processing document..."):
-                    try:
-                        ocr_response = process_ocr(mistral_client, document_source)
-                        
-                        if ocr_response and ocr_response.pages:
-                            # Extract all text without page markers for clean content
-                            raw_content = []
+                        with st.spinner("Processing image..."):
+                            # Process with Mathpix
+                            extracted_content = process_image_with_mathpix(
+                                img_str,
+                                app_id,
+                                app_key
+                            )
                             
-                            for page in ocr_response.pages:
-                                page_content = page.markdown.strip()
-                                if page_content:  # Only add non-empty pages
-                                    raw_content.append(page_content)
-                            
-                            # Join all content into one clean string for the model
-                            final_content = "\n\n".join(raw_content)
-                            
-                            # Also create a display version with page numbers for the UI
-                            display_content = []
-                            for i, page in enumerate(ocr_response.pages):
-                                page_content = page.markdown.strip()
-                                if page_content:
-                                    display_content.append(f"Page {i+1}:\n{page_content}")
-                            
-                            display_formatted = "\n\n----------\n\n".join(display_content)
-                            
-                            # Store both versions
-                            st.session_state.document_content = final_content  # Clean version for the model
-                            st.session_state.display_content = display_formatted  # Formatted version for display
+                            st.session_state.document_content = extracted_content
+                            st.session_state.display_content = extracted_content
                             st.session_state.document_loaded = True
                             
-                            # Show success information about extracted content
-                            st.success(f"Document processed successfully! Extracted {len(final_content)} characters from {len(raw_content)} pages.")
-                        else:
-                            st.warning("No content extracted from document.")
+                            st.success(f"Image processed successfully! Extracted {len(extracted_content)} characters.")
                     
                     except Exception as e:
-                        st.error(f"Processing error: {str(e)}")
+                        st.error(f"Error processing image: {str(e)}")
     
     # Main area: Display chat interface
     st.title("Document OCR & Chat")
@@ -356,7 +438,7 @@ def main():
     # Document preview area
     if "document_loaded" in st.session_state and st.session_state.document_loaded:
         with st.expander("Document Content", expanded=False):
-            # Show the display version with page numbers
+            # Show the display version
             if "display_content" in st.session_state:
                 st.markdown(st.session_state.display_content)
             else:
