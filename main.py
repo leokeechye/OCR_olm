@@ -123,9 +123,9 @@ def pdf_to_image(pdf_content, page_number=1, max_dim=1024):
     except Exception as e:
         raise ValueError(f"Error converting PDF to image: {str(e)}")
 
-# OCR Processing Functions using Qwen2-VL (base model for OlmoCR)
+# OCR Processing Functions using available Vision models
 def process_pdf_with_olmocr(client, pdf_content, filename, page_number=1):
-    """Process PDF using Qwen2-VL (base model of OlmoCR)"""
+    """Process PDF using available Replicate Vision models"""
     if client is None:
         raise ValueError("Replicate client is not initialized")
     
@@ -139,42 +139,48 @@ def process_pdf_with_olmocr(client, pdf_content, filename, page_number=1):
         img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
         image_url = f"data:image/png;base64,{img_base64}"
         
-        # Use Qwen2-VL model with OCR-focused prompt
-        # This is the base model that OlmoCR is fine-tuned from
-        output = client.run(
-            "lucataco/qwen2-vl-7b-instruct",
-            input={
-                "image": image_url,
-                "prompt": """Please extract all text from this document image. 
-                
-Follow these instructions:
-1. Read the text in natural reading order (left to right, top to bottom)
-2. Preserve the structure and formatting as much as possible
-3. Include all visible text, headers, paragraphs, tables, captions, etc.
-4. If there are multiple columns, read them in the correct order
-5. Maintain line breaks and spacing where appropriate
-6. Output the text in a clean, readable format
-
-Extract all text:""",
-                "max_tokens": 4096
+        # Try different working models in order of preference
+        models_to_try = [
+            # Try Moondream2 - a reliable vision model for OCR
+            {
+                "model": "lucataco/moondream2",
+                "input": {
+                    "image": image_url,
+                    "prompt": "Extract all text from this document image. Read the text in natural reading order (left to right, top to bottom). Preserve the structure and formatting. Include all visible text, headers, paragraphs, tables, and captions. Output the text in a clean, readable format."
+                }
+            },
+            # Try LLaVA as backup
+            {
+                "model": "yorickvp/llava-13b",
+                "input": {
+                    "image": image_url,
+                    "prompt": "Please extract all text from this document image. Read in natural order and preserve formatting. Include all visible text."
+                }
+            },
+            # Try SmolVLM as another backup
+            {
+                "model": "lucataco/smolvlm-instruct",
+                "input": {
+                    "image": image_url,
+                    "prompt": "Extract all text from this document image in natural reading order. Preserve structure and formatting.",
+                    "max_new_tokens": 2000
+                }
             }
-        )
+        ]
         
-        return output
+        for model_config in models_to_try:
+            try:
+                output = client.run(model_config["model"], input=model_config["input"])
+                if output and len(str(output).strip()) > 10:  # Basic validation
+                    return output
+            except Exception as e:
+                continue  # Try next model
+        
+        # If all models fail, raise an error
+        raise ValueError("All available vision models failed to process the image")
         
     except Exception as e:
-        # Fallback: try the original olmocr model with simpler parameters
-        try:
-            output = client.run(
-                "lucataco/olmocr-7b",
-                input={
-                    "image": image_url,
-                    "prompt": "Extract all text from this document in natural reading order."
-                }
-            )
-            return output
-        except Exception as e2:
-            raise ValueError(f"Error processing PDF. Qwen2-VL attempt: {str(e)}. OlmoCR attempt: {str(e2)}")
+        raise ValueError(f"Error processing PDF: {str(e)}")
 
 def process_image_with_olmocr(image_data):
     """Process image using Google Gemini Vision (since OlmoCR is primarily for PDFs)"""
@@ -368,7 +374,7 @@ def main():
                             st.error(f"Error reading PDF: {str(e)}")
                             return
                         
-                        with st.spinner(f"Converting page {page_number} to image and processing with Qwen2-VL/OlmoCR..."):
+                        with st.spinner(f"Converting page {page_number} to image and processing with Vision models..."):
                             # Show the converted image for reference
                             try:
                                 preview_image = pdf_to_image(content, page_number, max_dim=1024)
@@ -376,7 +382,7 @@ def main():
                             except Exception as e:
                                 st.warning(f"Could not display preview: {str(e)}")
                             
-                            # Process with Qwen2-VL/OlmoCR
+                            # Process with available Vision models
                             ocr_output = process_pdf_with_olmocr(
                                 replicate_client, 
                                 content, 
@@ -431,7 +437,7 @@ def main():
             st.info("Please configure your Replicate API token to upload documents.")
     
     # Main area: Display chat interface
-    st.title("Document OCR & Chat with Qwen2-VL / OlmoCR")
+    st.title("Document OCR & Chat with Vision Models")
     
     # Document preview area
     if "document_loaded" in st.session_state and st.session_state.document_loaded:
@@ -482,13 +488,13 @@ def main():
         ### About this app
         
         This application uses:
-        - **Qwen2-VL-7B**: Primary OCR model (base model for OlmoCR) for PDF processing
-        - **OlmoCR-7B**: Fallback OCR model (if available) for PDF processing
-        - **Google Gemini Vision**: Alternative for image OCR processing  
+        - **Moondream2**: Primary vision model for document OCR processing
+        - **LLaVA-13B**: Backup vision model for OCR processing
+        - **SmolVLM-Instruct**: Alternative compact vision model
+        - **Google Gemini Vision**: For image OCR processing  
         - **Google Gemini 2.5 Flash**: For chat functionality
         
-        Qwen2-VL-7B is a powerful vision-language model that excels at extracting text from document images.
-        OlmoCR-7B is a specialized fine-tuned version of Qwen2-VL specifically optimized for OCR tasks.
+        The app automatically tries multiple vision models to ensure reliable text extraction from your documents.
         """)
 
 if __name__ == "__main__":
