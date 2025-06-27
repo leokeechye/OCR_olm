@@ -1,0 +1,7 @@
+mistralai
+streamlit
+dotenv
+Pillow
+langgraph
+google-generativeai
+PyMuPDF
