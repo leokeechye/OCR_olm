@@ -2,13 +2,26 @@ import streamlit as st
 import base64
 import tempfile
 import os
-from mistralai import Mistral
 from PIL import Image
 import io
-from mistralai import DocumentURLChunk, ImageURLChunk
-from mistralai.models import OCRResponse
-import replicate
 import json
+
+# Handle optional imports with error checking
+try:
+    from mistralai import Mistral
+    from mistralai import DocumentURLChunk, ImageURLChunk
+    from mistralai.models import OCRResponse
+    MISTRAL_AVAILABLE = True
+except ImportError:
+    MISTRAL_AVAILABLE = False
+    st.error("Mistral AI package not installed. Please install with: pip install mistralai")
+
+try:
+    import replicate
+    REPLICATE_AVAILABLE = True
+except ImportError:
+    REPLICATE_AVAILABLE = False
+    st.error("Replicate package not installed. Please install with: pip install replicate")
 
 # Load environment variables for deployment
 def load_config():
@@ -30,6 +43,10 @@ api_key, replicate_api_key = load_config()
 # Initialize client function with proper error handling
 def initialize_mistral_client(api_key):
     """Initialize Mistral client with error handling"""
+    if not MISTRAL_AVAILABLE:
+        st.sidebar.error("Mistral AI package not available")
+        return None
+        
     if not api_key:
         return None
     
@@ -45,6 +62,9 @@ def initialize_mistral_client(api_key):
 # Test Replicate API key
 def test_replicate_api(api_key):
     """Test Replicate API key and return status"""
+    if not REPLICATE_AVAILABLE:
+        return False, "Replicate package not installed"
+        
     if not api_key:
         return False, "No API key provided"
     
@@ -59,6 +79,9 @@ def test_replicate_api(api_key):
 # OCR Processing Functions using OLMoCR-7B
 def process_pdf_with_olmocr(pdf_content, filename):
     """Process PDF using OLMoCR-7B from Replicate"""
+    if not REPLICATE_AVAILABLE:
+        raise ValueError("Replicate package is not installed")
+        
     if not replicate_api_key:
         raise ValueError("Replicate API key is not configured")
     
@@ -108,6 +131,9 @@ def process_pdf_with_olmocr(pdf_content, filename):
 
 def process_image_with_olmocr(image_content):
     """Process image using OLMoCR-7B from Replicate"""
+    if not REPLICATE_AVAILABLE:
+        raise ValueError("Replicate package is not installed")
+        
     if not replicate_api_key:
         raise ValueError("Replicate API key is not configured")
     
@@ -199,6 +225,9 @@ def process_ocr(client, document_source):
 
 def generate_response(context, query):
     """Generate a response using OLMoCR-7B from Replicate for text analysis"""
+    if not REPLICATE_AVAILABLE:
+        return "Error: Replicate package is not installed. Please install with: pip install replicate"
+        
     try:
         # Check for empty context
         if not context or len(context) < 10:
@@ -317,14 +346,17 @@ def main():
         st.subheader("Document Upload")
         
         # Show OCR method selection
-        if replicate_api_key:
+        if replicate_api_key and REPLICATE_AVAILABLE:
             ocr_method = st.radio("OCR Method:", ["Mistral OCR", "OLMoCR-7B (Replicate)"])
         else:
             ocr_method = "Mistral OCR"
-            st.info("Add Replicate API token to enable OLMoCR-7B")
+            if not REPLICATE_AVAILABLE:
+                st.info("Install replicate package to enable OLMoCR-7B: pip install replicate")
+            elif not replicate_api_key:
+                st.info("Add Replicate API token to enable OLMoCR-7B")
         
         # Only show document upload if at least one OCR method is available
-        if mistral_client or replicate_api_key:
+        if mistral_client or (replicate_api_key and REPLICATE_AVAILABLE):
             input_method = st.radio("Select Input Type:", ["PDF Upload", "Image Upload", "URL"])
             
             document_source = None
@@ -338,7 +370,7 @@ def main():
                             "document_url": url,
                             "ocr_method": "mistral"
                         }
-                    elif ocr_method == "OLMoCR-7B (Replicate)" and replicate_api_key:
+                    elif ocr_method == "OLMoCR-7B (Replicate)" and replicate_api_key and REPLICATE_AVAILABLE:
                         st.info("OLMoCR-7B currently supports PDF uploads. URL processing coming soon.")
             
             elif input_method == "PDF Upload":
@@ -347,7 +379,7 @@ def main():
                     content = uploaded_file.read()
                     
                     try:
-                        if ocr_method == "OLMoCR-7B (Replicate)" and replicate_api_key:
+                        if ocr_method == "OLMoCR-7B (Replicate)" and replicate_api_key and REPLICATE_AVAILABLE:
                             # Use OLMoCR-7B for processing
                             with st.spinner("Processing with OLMoCR-7B..."):
                                 extracted_text = process_pdf_with_olmocr(content, uploaded_file.name)
@@ -475,8 +507,11 @@ def main():
         # Input for user query
         if prompt := st.chat_input("Ask a question about your document..."):
             # Check if Replicate API key is available
-            if not replicate_api_key:
-                st.error("Replicate API token is required for generating responses. Please add it in the sidebar settings.")
+            if not replicate_api_key or not REPLICATE_AVAILABLE:
+                if not REPLICATE_AVAILABLE:
+                    st.error("Replicate package is not installed. Please install with: pip install replicate")
+                else:
+                    st.error("Replicate API token is required for generating responses. Please add it in the sidebar settings.")
             else:
                 # Add user message to chat history
                 st.session_state.messages.append({"role": "user", "content": prompt})
